@@ -166,9 +166,14 @@ esac
 done
 EOF
 
+
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
 chmod +x ~/.local/bin/wpmanager
 chmod +x ~/.local/bin/create_wp
 chmod +x ~/.local/bin/run
+
+
 echo "============================================"
 echo " 🎉 Встановлення завершено!"
 echo ""
