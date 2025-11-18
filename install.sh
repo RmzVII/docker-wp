@@ -167,7 +167,8 @@ done
 EOF
 
 chmod +x ~/.local/bin/wpmanager
-
+chmod +x ~/.local/bin/create_wp
+chmod +x ~/.local/bin/run
 echo "============================================"
 echo " 🎉 Встановлення завершено!"
 echo ""
