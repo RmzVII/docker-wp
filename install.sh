@@ -60,7 +60,7 @@ services:
     container_name: ${PROJECT}_db
     restart: always
     volumes:
-      - db_data:/var/lib/mysql
+      - ${PROJECT}_db_data:/var/lib/mysql
     environment:
       MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: wp_db1
@@ -82,7 +82,7 @@ services:
       WORDPRESS_DB_PASSWORD: Qwe1Asd2Zxc3
       WORDPRESS_DB_NAME: wp_db1
 volumes:
-  db_data:
+  ${PROJECT}_db_data:
 EOT
 echo "Сайт створено: http://localhost:$PORT"
 EOF
