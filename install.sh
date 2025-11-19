@@ -146,8 +146,27 @@ case $CH in
     ;;
   4)
     read -p "Назва сайту: " NAME
-    rm -rf "$HOME/projects/$NAME"
-    ;;
+  DIR="$HOME/projects/$NAME"
+  YML="$DIR/docker-compose.yml"
+
+  if [ -f "$YML" ]; then
+      echo "🛑 Зупинка контейнерів..."
+      docker compose -f "$YML" down --volumes || true
+  fi
+
+  echo "🗑 Видалення контейнерів..."
+  docker rm -f "${NAME}_wp" 2>/dev/null || true
+  docker rm -f "${NAME}_db" 2>/dev/null || true
+
+  echo "🧹 Видалення volume..."
+  docker volume rm "${NAME}_db_data" 2>/dev/null || true
+
+  echo "📁 Видалення файлів сайту..."
+  rm -rf "$DIR"
+
+  echo "✔ Сайт '$NAME' повністю видалено!"
+  read -p "Enter..."
+  ;;
   5)
     ls "$HOME/projects"
     read -p "Enter..."
