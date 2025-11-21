@@ -1,30 +1,66 @@
 #!/bin/bash
 set -e
 
-# =================================================
-# WordPress Manager v4 (для WSL)
-# =================================================
+echo "============================================"
+echo " 🚀 WSL WordPress Manager Installer"
+echo "============================================"
 
-PROJECTS_DIR="$HOME/projects"
-mkdir -p "$PROJECTS_DIR"
+# Update & install dependencies
+sudo apt update -y
+sudo apt install -y ca-certificates curl gnupg lsb-release lsof
 
-# ===================== FUNCTIONS =====================
-create_wp() {
-    if [ -z "$1" ] || [ -z "$2" ]; then
-        echo "❗ Використання: create_wp <ім'я_проєкту> <порт>"
-        return 1
-    fi
+# Docker install
+echo "➡ Installing Docker..."
+sudo install -m 0755 -d /etc/apt/keyrings || true
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg |
+  sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
 
-    PROJECT="$1"
-    PORT="$2"
-    DIR="$PROJECTS_DIR/$PROJECT"
-    mkdir -p "$DIR/wp"
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
+sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-    echo "🚀 Створюємо сайт: $PROJECT на порту $PORT"
-    echo "Директорія сайту: $DIR/wp"
+sudo apt update -y
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 
-    # php.ini
-    cat > "$DIR/php.ini" <<EOT
+sudo usermod -aG docker $USER || true
+
+mkdir -p ~/projects
+mkdir -p ~/.local/bin
+
+# ---------------------------
+# create_wp
+# ---------------------------
+cat > ~/.local/bin/create_wp <<'EOF'
+#!/bin/bash
+set -e
+
+if [ -z "$1" ] || [ -z "$2" ]; then
+    echo "❗ Usage: create_wp <project_name> <port>"
+    exit 1
+fi
+
+PROJECT="$1"
+PORT="$2"
+DIR="$HOME/projects/$PROJECT"
+
+# Check if project exists
+if [ -d "$DIR" ]; then
+    echo "❌ Project '$PROJECT' already exists."
+    exit 1
+fi
+
+# Check if port is free
+if lsof -i :"$PORT" >/dev/null 2>&1; then
+    echo "❌ Port $PORT is already in use."
+    exit 1
+fi
+
+mkdir -p "$DIR/wp"
+cd "$DIR"
+
+# PHP config
+cat > php.ini <<EOT
 file_uploads = On
 memory_limit = 512M
 upload_max_filesize = 512M
@@ -33,8 +69,8 @@ max_execution_time = 600
 max_input_time = 600
 EOT
 
-    # docker-compose.yml
-    cat > "$DIR/docker-compose.yml" <<EOT
+# Docker Compose
+cat > docker-compose.yml <<EOT
 version: "3.9"
 services:
   db:
@@ -67,109 +103,126 @@ volumes:
   ${PROJECT}_db_data:
 EOT
 
-    echo "✅ Сайт створено! Відкрий: http://localhost:$PORT"
-}
+echo "✅ Project '$PROJECT' created in $DIR"
+echo "➡ Starting containers..."
+docker compose up -d
+echo "🌐 Visit: http://localhost:$PORT"
+EOF
+chmod +x ~/.local/bin/create_wp
 
-run() {
-    PROJECT="$1"
-    CMD="$2"
-    DIR="$PROJECTS_DIR/$PROJECT"
-    YML="$DIR/docker-compose.yml"
+# ---------------------------
+# run
+# ---------------------------
+cat > ~/.local/bin/run <<'EOF'
+#!/bin/bash
+set -e
 
-    if [ ! -f "$YML" ]; then
-        echo "❌ Проєкт $PROJECT не знайдено"
-        return 1
-    fi
+PROJECT="$1"
+CMD="$2"
+DIR="$HOME/projects/$PROJECT"
+YML="$DIR/docker-compose.yml"
 
-    case "$CMD" in
-        start) docker compose -f "$YML" up -d ;;
-        stop) docker compose -f "$YML" down ;;
-        restart)
-            docker compose -f "$YML" down
-            docker compose -f "$YML" up -d ;;
-        logs) docker compose -f "$YML" logs -f ;;
-        open)
-            PORT=$(grep -oP '[0-9]+(?=:80)' "$YML")
-            xdg-open "http://localhost:$PORT" ;;
-        *) echo "Команди: start | stop | restart | logs | open"; return 1 ;;
-    esac
-}
+if [ ! -f "$YML" ]; then
+    echo "❌ Project '$PROJECT' does not exist."
+    exit 1
+fi
 
-list_sites() {
-    echo "Список сайтів:"
-    ls "$PROJECTS_DIR"
-}
+case "$CMD" in
+  start)
+    echo "➡ Starting '$PROJECT'..."
+    docker compose -f "$YML" up -d ;;
+  stop)
+    echo "➡ Stopping '$PROJECT'..."
+    docker compose -f "$YML" down ;;
+  restart)
+    echo "➡ Restarting '$PROJECT'..."
+    docker compose -f "$YML" down
+    docker compose -f "$YML" up -d ;;
+  logs)
+    docker compose -f "$YML" logs -f ;;
+  open)
+    PORT=$(grep -oP '[0-9]+(?=:80)' "$YML")
+    xdg-open "http://localhost:$PORT" ;;
+  *)
+    echo "Commands: start | stop | restart | logs | open"
+    exit 1 ;;
+esac
+EOF
+chmod +x ~/.local/bin/run
 
-delete_site() {
-    PROJECT="$1"
-    DIR="$PROJECTS_DIR/$PROJECT"
-
-    if [ -d "$DIR" ]; then
-        echo "⚠️ Зупинка контейнерів сайту $PROJECT..."
-        run "$PROJECT" stop 2>/dev/null || true
-
-        echo "🗑 Видалення папки $DIR..."
-        sudo rm -rf "$DIR"
-
-        echo "✅ Сайт $PROJECT видалено"
-    else
-        echo "❌ Сайт $PROJECT не знайдено"
-    fi
-}
-
-# ===================== MENU =====================
+# ---------------------------
+# wpmanager menu
+# ---------------------------
+cat > ~/.local/bin/wpmanager <<'EOF'
+#!/bin/bash
 while true; do
-    clear
-    echo "==============================="
-    echo "   WordPress Manager v4"
-    echo "==============================="
-    echo "1. Створити новий сайт"
-    echo "2. Запустити сайт"
-    echo "3. Зупинити сайт"
-    echo "4. Видалити сайт"
-    echo "5. Список сайтів"
-    echo "6. Переглянути Docker статус"
-    echo "7. Очистити всі контейнери"
-    echo "0. Вихід"
-    echo "-------------------------------"
-    read -p "Вибір: " CH
+clear
+echo "==============================="
+echo "   WordPress Manager"
+echo "==============================="
+echo "1. Create new site"
+echo "2. Start site"
+echo "3. Stop site"
+echo "4. Restart site"
+echo "5. Delete site"
+echo "6. List sites"
+echo "7. Docker status"
+echo "8. Cleanup all containers"
+echo "0. Exit"
+echo "-------------------------------"
+read -p "Choice: " CH
 
-    case $CH in
-        1)
-            read -p "Назва сайту: " NAME
-            read -p "Порт (наприклад 8081): " PORT
-            create_wp "$NAME" "$PORT"
-            read -p "Натисніть Enter..."
-            ;;
-        2)
-            read -p "Назва сайту: " NAME
-            run "$NAME" start
-            read -p "Натисніть Enter..."
-            ;;
-        3)
-            read -p "Назва сайту: " NAME
-            run "$NAME" stop
-            read -p "Натисніть Enter..."
-            ;;
-        4)
-            read -p "Назва сайту: " NAME
-            delete_site "$NAME"
-            read -p "Натисніть Enter..."
-            ;;
-        5)
-            list_sites
-            read -p "Натисніть Enter..."
-            ;;
-        6)
-            docker ps -a
-            read -p "Натисніть Enter..."
-            ;;
-        7)
-            docker stop $(docker ps -aq) 2>/dev/null || true
-            docker rm $(docker ps -aq) 2>/dev/null || true
-            read -p "Натисніть Enter..."
-            ;;
-        0) exit 0 ;;
-        *) echo "❌ Невірний вибір"; read -p "Натисніть Enter..." ;;
-    esac
+case $CH in
+  1)
+    read -p "Project name: " NAME
+    read -p "Port (e.g., 8081): " PORT
+    create_wp "$NAME" "$PORT"
+    read -p "Press Enter..." ;;
+  2)
+    read -p "Project name: " NAME
+    run "$NAME" start
+    read -p "Press Enter..." ;;
+  3)
+    read -p "Project name: " NAME
+    run "$NAME" stop
+    read -p "Press Enter..." ;;
+  4)
+    read -p "Project name: " NAME
+    run "$NAME" restart
+    read -p "Press Enter..." ;;
+  5)
+    read -p "Project name: " NAME
+    echo "➡ Stopping and removing project '$NAME'..."
+    run "$NAME" stop || true
+    docker rm -f "${NAME}_wp" "${NAME}_db" 2>/dev/null || true
+    docker volume rm "${NAME}_db_data" 2>/dev/null || true
+    rm -rf "$HOME/projects/$NAME"
+    echo "✅ Project '$NAME' deleted."
+    read -p "Press Enter..." ;;
+  6)
+    echo "📂 Projects:"
+    ls "$HOME/projects"
+    read -p "Press Enter..." ;;
+  7)
+    docker ps -a
+    read -p "Press Enter..." ;;
+  8)
+    read -p "⚠ This will stop and remove ALL containers! Are you sure? (y/N): " CONF
+    if [[ "$CONF" == "y" || "$CONF" == "Y" ]]; then
+      docker stop $(docker ps -aq) 2>/dev/null || true
+      docker rm $(docker ps -aq) 2>/dev/null || true
+    fi
+    read -p "Press Enter..." ;;
+  0) exit 0 ;;
+esac
 done
+EOF
+chmod +x ~/.local/bin/wpmanager
+
+echo "============================================"
+echo " 🎉 Installation complete!"
+echo ""
+echo "➡ Run manager: wpmanager"
+echo "➡ Create new site: create_wp project 8081"
+echo "➡ Start/Stop site: run project start|stop|restart|logs|open"
+echo "============================================"
