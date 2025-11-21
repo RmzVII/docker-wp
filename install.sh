@@ -1,51 +1,79 @@
 #!/bin/bash
+set -euo pipefail
 
 SITES_DIR="$HOME/wordpress_sites"
-
 mkdir -p "$SITES_DIR"
 
 check_port() {
-    local PORT=$1
-    if ss -tulpn 2>/dev/null | grep -q ":$PORT "; then
-        return 1
-    else
-        return 0
+  local PORT=$1
+  if ss -tulpn 2>/dev/null | grep -q ":${PORT} "; then
+    return 1
+  else
+    return 0
+  fi
+}
+
+wait_db_healthy() {
+  local DB_CONTAINER="$1"
+  local MAX_SECS=120
+  local INTERVAL=2
+  local waited=0
+
+  echo "⏳ Чекаю, поки БД стане ready (max ${MAX_SECS}s)..."
+  while true; do
+    # перевіряємо статус health (якщо є)
+    status=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$DB_CONTAINER" 2>/dev/null || true)
+    if [[ "$status" == "healthy" ]]; then
+      echo "✅ БД готова (healthy)."
+      return 0
     fi
+
+    # якщо немає health info — пробуємо mysqladmin ping
+    if docker exec "$DB_CONTAINER" mysqladmin ping -uroot -prootpass --silent >/dev/null 2>&1; then
+      echo "✅ БД відповідає на ping."
+      return 0
+    fi
+
+    sleep $INTERVAL
+    waited=$((waited + INTERVAL))
+    if (( waited >= MAX_SECS )); then
+      echo "❌ Таймаут очікування БД ($MAX_SECS s)."
+      echo "Подивись логи БД: docker logs $DB_CONTAINER"
+      return 1
+    fi
+  done
 }
 
 create_site() {
-    echo "Введи ім'я сайту (латиниця, без пробілів):"
-    read SITENAME
+  read -p "Введи ім'я сайту (латиницею, без пробілів): " SITENAME
+  if [[ -z "$SITENAME" ]]; then
+    echo "❗ Ім'я не може бути пустим."
+    return
+  fi
 
-    if [[ -z "$SITENAME" ]]; then
-        echo "❌ Ім'я не може бути порожнім."
-        return
-    fi
+  SITE_PATH="$SITES_DIR/$SITENAME"
+  if [[ -d "$SITE_PATH" ]]; then
+    echo "❗ Сайт '$SITENAME' вже існує у $SITE_PATH."
+    return
+  fi
 
-    SITE_PATH="$SITES_DIR/$SITENAME"
+  read -p "Введи порт (наприклад 8081): " PORT
+  if ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
+    echo "❗ Порт має бути числом."
+    return
+  fi
 
-    if [[ -d "$SITE_PATH" ]]; then
-        echo "❌ Такий сайт вже існує."
-        return
-    fi
+  if ! check_port "$PORT"; then
+    echo "❗ Порт $PORT вже зайнятий. Обери інший."
+    return
+  fi
 
-    echo "Введи порт (наприклад 8081):"
-    read PORT
+  echo "📁 Створюю папку сайту: $SITE_PATH"
+  mkdir -p "$SITE_PATH"
 
-    if ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
-        echo "❌ Порт має бути числом."
-        return
-    fi
-
-    if ! check_port "$PORT"; then
-        echo "❌ Порт $PORT вже зайнятий!"
-        return
-    fi
-
-    mkdir -p "$SITE_PATH"
-
-    # Docker Compose
-    cat > "$SITE_PATH/docker-compose.yml" <<EOF
+  echo "✍ Генерую docker-compose.yml ..."
+  cat > "$SITE_PATH/docker-compose.yml" <<EOF
+version: "3.9"
 services:
   db:
     image: mariadb:10.6
@@ -57,7 +85,12 @@ services:
       MYSQL_USER: wpuser
       MYSQL_PASSWORD: wppass
     volumes:
-      - db_data:/var/lib/mysql
+      - ${SITENAME}_db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-uroot", "-prootpass"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   wordpress:
     image: wordpress:php8.2-fpm
@@ -66,12 +99,12 @@ services:
     depends_on:
       - db
     environment:
-      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_HOST: db:3306
       WORDPRESS_DB_USER: wpuser
       WORDPRESS_DB_PASSWORD: wppass
       WORDPRESS_DB_NAME: wpdb
     volumes:
-      - wp_data:/var/www/html
+      - ${SITENAME}_wp_data:/var/www/html
 
   nginx:
     image: nginx:alpine
@@ -79,20 +112,20 @@ services:
     ports:
       - "${PORT}:80"
     volumes:
-      - wp_data:/var/www/html
+      - ${SITENAME}_wp_data:/var/www/html
       - ./nginx.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - wordpress
 
 volumes:
-  db_data:
-  wp_data:
+  ${SITENAME}_db_data:
+  ${SITENAME}_wp_data:
 EOF
 
-    # NGINX
-    cat > "$SITE_PATH/nginx.conf" <<EOF
+  cat > "$SITE_PATH/nginx.conf" <<'EOF'
 server {
     listen 80;
     root /var/www/html;
-
     index index.php index.html;
 
     location / {
@@ -107,87 +140,102 @@ server {
 }
 EOF
 
-    cd "$SITE_PATH"
-    docker compose up -d
+  pushd "$SITE_PATH" >/dev/null
+  echo "⬆ Піднімаю контейнери (docker compose up -d)..."
+  docker compose up -d
 
-    echo "✅ Сайт створено: http://localhost:${PORT}"
+  # Чекаємо, поки БД стане готовою
+  if wait_db_healthy "${SITENAME}_db"; then
+    echo "✅ Сайт створено і БД готова."
+    echo "Відкрий: http://localhost:${PORT}"
+  else
+    echo "❗ Помилка: БД не стала ready. Подивись логи:"
+    echo "docker compose -f $SITE_PATH/docker-compose.yml logs db --tail=200"
+    echo "docker compose -f $SITE_PATH/docker-compose.yml logs wordpress --tail=200"
+  fi
+  popd >/dev/null
 }
 
 start_site() {
-    echo "Вибери сайт для запуску:"
-    ls "$SITES_DIR"
-    read SITENAME
-    SITE_PATH="$SITES_DIR/$SITENAME"
-
-    if [[ ! -d "$SITE_PATH" ]]; then
-        echo "❌ Немає такого сайту."
-        return
-    fi
-
-    cd "$SITE_PATH"
-    docker compose up -d
-    echo "🚀 Сайт запущено."
+  read -p "Назва сайту для запуску: " SITENAME
+  SITE_PATH="$SITES_DIR/$SITENAME"
+  if [[ ! -f "$SITE_PATH/docker-compose.yml" ]]; then
+    echo "❗ Сайт не знайдено: $SITE_PATH"
+    return
+  fi
+  pushd "$SITE_PATH" >/dev/null
+  echo "⬆ Запускаю контейнери..."
+  docker compose up -d
+  wait_db_healthy "${SITENAME}_db" || echo "❗ DB може бути не готова — перевір логи"
+  popd >/dev/null
+  echo "✅ Done."
 }
 
 stop_site() {
-    echo "Вибери сайт для зупинки:"
-    ls "$SITES_DIR"
-    read SITENAME
-    SITE_PATH="$SITES_DIR/$SITENAME"
-
-    if [[ ! -d "$SITE_PATH" ]]; then
-        echo "❌ Немає такого сайту."
-        return
-    fi
-
-    cd "$SITE_PATH"
-    docker compose stop
-    echo "🛑 Сайт зупинено."
+  read -p "Назва сайту для зупинки: " SITENAME
+  SITE_PATH="$SITES_DIR/$SITENAME"
+  if [[ ! -f "$SITE_PATH/docker-compose.yml" ]]; then
+    echo "❗ Сайт не знайдено."
+    return
+  fi
+  pushd "$SITE_PATH" >/dev/null
+  echo "⬇ Зупиняю контейнери..."
+  docker compose down
+  popd >/dev/null
+  echo "✅ Сайт зупинено."
 }
 
 delete_site() {
-    echo "Вибери сайт для видалення:"
-    ls "$SITES_DIR"
-    read SITENAME
-    SITE_PATH="$SITES_DIR/$SITENAME"
+  read -p "Назва сайту для видалення: " SITENAME
+  SITE_PATH="$SITES_DIR/$SITENAME"
+  if [[ ! -d "$SITE_PATH" ]]; then
+    echo "❗ Такого сайту немає."
+    return
+  fi
 
-    if [[ ! -d "$SITE_PATH" ]]; then
-        echo "❌ Немає такого сайту."
-        return
-    fi
+  pushd "$SITE_PATH" >/dev/null
+  echo "⏳ Зупиняю і видаляю контейнери та томи..."
+  docker compose down --volumes --remove-orphans || true
 
-    cd "$SITE_PATH"
-    docker compose down --volumes
+  popd >/dev/null
+  echo "⏳ Видаляю папку сайту (якщо потрібні права, буде використано sudo)..."
+  sudo rm -rf "$SITE_PATH" || { echo "❗ Не вдалося видалити папку без sudo. Спробуйте вручну."; return; }
 
-    sudo rm -rf "$SITE_PATH"
+  # також на підстраховку підчищаємо можливі залишкові томи з таким префіксом
+  echo "🔎 Додатково очищаю томи з префіксом ${SITENAME}_..."
+  docker volume ls -q | grep "^${SITENAME}_" | xargs -r docker volume rm
 
-    echo "🗑 Сайт видалено."
+  echo "✅ Сайт $SITENAME повністю видалено."
 }
 
 list_sites() {
-    echo "📂 Сайти:"
-    ls "$SITES_DIR"
+  echo "📂 Сайти у $SITES_DIR:"
+  ls -1 "$SITES_DIR" || echo "(пусто)"
 }
 
-while true; do
-    echo ""
-    echo "========== WordPress Manager =========="
-    echo "1) Створити сайт"
-    echo "2) Запустити сайт"
-    echo "3) Зупинити сайт"
-    echo "4) Видалити сайт"
-    echo "5) Переглянути список сайтів"
-    echo "6) Вихід"
-    echo "========================================"
-    read CHOICE
+show_help() {
+  echo ""
+  echo "Меню: "
+  echo "1) Створити сайт"
+  echo "2) Запустити сайт"
+  echo "3) Зупинити сайт"
+  echo "4) Видалити сайт"
+  echo "5) Список сайтів"
+  echo "6) Вихід"
+  echo ""
+}
 
-    case $CHOICE in
-        1) create_site ;;
-        2) start_site ;;
-        3) stop_site ;;
-        4) delete_site ;;
-        5) list_sites ;;
-        6) exit ;;
-        *) echo "❌ Невірний вибір" ;;
-    esac
+# Головне меню
+while true; do
+  show_help
+  read -p "Вибір: " CHOICE
+  case "$CHOICE" in
+    1) create_site ;;
+    2) start_site ;;
+    3) stop_site ;;
+    4) delete_site ;;
+    5) list_sites ;;
+    6) echo "Вихід."; exit 0 ;;
+    *) echo "Невірний вибір." ;;
+  esac
 done
