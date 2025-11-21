@@ -191,14 +191,30 @@ case $CH in
     run "$NAME" restart
     read -p "Press Enter..." ;;
   5)
-    read -p "Project name: " NAME
-    echo "➡ Stopping and removing project '$NAME'..."
-    run "$NAME" stop || true
-    docker rm -f "${NAME}_wp" "${NAME}_db" 2>/dev/null || true
-    docker volume rm "${NAME}_db_data" 2>/dev/null || true
-    rm -rf "$HOME/projects/$NAME"
-    echo "✅ Project '$NAME' deleted."
-    read -p "Press Enter..." ;;
+  read -p "Project name: " NAME
+  DIR="$HOME/projects/$NAME"
+  if [ ! -d "$DIR" ]; then
+    echo "❌ Project '$NAME' does not exist."
+    read -p "Press Enter..."
+    continue
+  fi
+  echo "➡ Stopping and removing project '$NAME'..."
+  
+  # stop containers if exist
+  docker compose -f "$DIR/docker-compose.yml" down 2>/dev/null || true
+  
+  # remove containers by name just in case
+  docker rm -f "${NAME}_wp" "${NAME}_db" 2>/dev/null || true
+  
+  # remove volumes forcefully
+  docker volume rm -f "${NAME}_db_data" 2>/dev/null || true
+  
+  # remove project folder (sudo to remove root-owned files)
+  sudo rm -rf "$DIR"
+  
+  echo "✅ Project '$NAME' completely deleted."
+  read -p "Press Enter..."
+  ;;
   6)
     echo "📂 Projects:"
     ls "$HOME/projects"
