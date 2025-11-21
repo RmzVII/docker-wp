@@ -2,7 +2,7 @@
 set -e
 
 echo "============================================"
-echo " 🚀 Встановлення WSL WordPress Manager"
+echo " 🚀 Встановлення WSL WordPress Manager v2"
 echo "============================================"
 
 # Update
@@ -29,19 +29,39 @@ sudo usermod -aG docker $USER || true
 mkdir -p ~/projects
 mkdir -p ~/.local/bin
 
-# create_wp script
+##############################################################
+# create_wp
+##############################################################
 cat > ~/.local/bin/create_wp <<'EOF'
 #!/bin/bash
 set -e
+
 if [ -z "$1" ] || [ -z "$2" ]; then
     echo "❗ Використання: create_wp <ім'я_проєкту> <порт>"
     exit 1
 fi
+
 PROJECT="$1"
 PORT="$2"
 DIR="$HOME/projects/$PROJECT"
+
+# Перевірка що такого сайту ще немає
+if [ -d "$DIR" ]; then
+    echo "❗ Помилка: сайт '$PROJECT' вже існує!"
+    exit 1
+fi
+
+# Перевірка чи порт зайнятий
+if ss -tulpn | grep -q ":$PORT "; then
+    echo "❗ Порт $PORT вже використовується!"
+    exit 1
+fi
+
 mkdir -p "$DIR/wp"
 cd "$DIR"
+
+export UID=$(id -u)
+export GID=$(id -g)
 
 cat > php.ini <<EOT
 file_uploads = On
@@ -66,6 +86,7 @@ services:
       MYSQL_DATABASE: wp_db1
       MYSQL_USER: wpuser
       MYSQL_PASSWORD: Qwe1Asd2Zxc3
+
   wordpress:
     image: wordpress:php8.2-apache
     container_name: ${PROJECT}_wp
@@ -81,15 +102,21 @@ services:
       WORDPRESS_DB_USER: wpuser
       WORDPRESS_DB_PASSWORD: Qwe1Asd2Zxc3
       WORDPRESS_DB_NAME: wp_db1
+    user: "${UID}:${GID}"
+
 volumes:
   ${PROJECT}_db_data:
 EOT
-echo "Сайт створено: http://localhost:$PORT"
+
+echo "🎉 Сайт створено!"
+echo "🌍 URL: http://localhost:$PORT"
 EOF
 
 chmod +x ~/.local/bin/create_wp
 
+##############################################################
 # run script
+##############################################################
 cat > ~/.local/bin/run <<'EOF'
 #!/bin/bash
 set -e
@@ -99,25 +126,39 @@ DIR="$HOME/projects/$PROJECT"
 
 YML="$DIR/docker-compose.yml"
 
+if [ ! -f "$YML" ]; then
+    echo "❗ Сайт '$PROJECT' не існує"
+    exit 1
+fi
+
 case "$CMD" in
   start) docker compose -f "$YML" up -d ;;
   stop) docker compose -f "$YML" down ;;
   restart) docker compose -f "$YML" down && docker compose -f "$YML" up -d ;;
   logs) docker compose -f "$YML" logs -f ;;
-  open) xdg-open "http://localhost:$(grep -oP '[0-9]+(?=:80)' "$YML")" ;;
-  *) echo "Команди: start | stop | restart | logs | open"; exit 1 ;;
+  open)
+      PORT=$(grep -oP '[0-9]+(?=:80)' "$YML")
+      xdg-open "http://localhost:$PORT"
+      ;;
+  *)
+    echo "Команди: start | stop | restart | logs | open"
+    exit 1
+    ;;
 esac
 EOF
 
 chmod +x ~/.local/bin/run
 
+
+##############################################################
 # wpmanager (menu)
+##############################################################
 cat > ~/.local/bin/wpmanager <<'EOF'
 #!/bin/bash
 while true; do
 clear
 echo "==============================="
-echo "   WordPress Manager"
+echo "   WordPress Manager v2"
 echo "==============================="
 echo "1. Створити новий сайт"
 echo "2. Запустити сайт"
@@ -133,65 +174,59 @@ read -p "Вибір: " CH
 case $CH in
   1)
     read -p "Назва сайту: " NAME
-    read -p "Порт (напр. 8081): " PORT
+    read -p "Порт (наприклад 8081): " PORT
     create_wp "$NAME" "$PORT"
+    read -p "Enter..."
     ;;
+
   2)
     read -p "Назва сайту: " NAME
     run "$NAME" start
+    read -p "Enter..."
     ;;
+
   3)
     read -p "Назва сайту: " NAME
     run "$NAME" stop
+    read -p "Enter..."
     ;;
+
   4)
     read -p "Назва сайту: " NAME
-  DIR="$HOME/projects/$NAME"
-  YML="$DIR/docker-compose.yml"
+    if [ ! -d "$HOME/projects/$NAME" ]; then
+        echo "❗ Сайт не існує!"
+        read -p "Enter..."
+        continue
+    fi
+    sudo rm -rf "$HOME/projects/$NAME"
+    echo "🗑 Сайт видалено."
+    read -p "Enter..."
+    ;;
 
-  if [ -f "$YML" ]; then
-      echo "🛑 Зупинка контейнерів..."
-      docker compose -f "$YML" down --volumes || true
-  fi
-
-  echo "🗑 Видалення контейнерів..."
-  docker rm -f "${NAME}_wp" 2>/dev/null || true
-  docker rm -f "${NAME}_db" 2>/dev/null || true
-
-  echo "🧹 Видалення volume..."
-  docker volume rm "${NAME}_db_data" 2>/dev/null || true
-
-  echo "📁 Видалення файлів сайту..."
-  rm -rf "$DIR"
-
-  echo "✔ Сайт '$NAME' повністю видалено!"
-  read -p "Enter..."
-  ;;
   5)
     ls "$HOME/projects"
     read -p "Enter..."
     ;;
+
   6)
     docker ps -a
     read -p "Enter..."
     ;;
+
   7)
     docker stop $(docker ps -aq) 2>/dev/null || true
     docker rm $(docker ps -aq) 2>/dev/null || true
     read -p "Enter..."
     ;;
+
   0) exit 0 ;;
 esac
 done
 EOF
 
-
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
 chmod +x ~/.local/bin/wpmanager
 chmod +x ~/.local/bin/create_wp
 chmod +x ~/.local/bin/run
-
 
 echo "============================================"
 echo " 🎉 Встановлення завершено!"
