@@ -1,191 +1,337 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-BASE_DIR="$HOME/docker-wp"
+# ---------------------------
+# Install / WP manager installer
+# ---------------------------
+# Default directory for sites (can be overridden by env SITES_DIR)
+SITES_DIR="${SITES_DIR:-$HOME/projects}"
+BIN_DIR="${HOME}/.local/bin"
 
-mkdir -p "$BASE_DIR"
+echo "============================================"
+echo "  WSL WordPress Manager installer"
+echo "  Sites directory: $SITES_DIR"
+echo "  Bin directory:    $BIN_DIR"
+echo "============================================"
 
-# ===========================
-#  Перевірка зайнятості порту
-# ===========================
-check_port() {
-    local PORT="$1"
+# ensure bin dir
+mkdir -p "$BIN_DIR"
+mkdir -p "$SITES_DIR"
 
-    if [[ -z "$PORT" ]]; then
-        echo "❌ Порт не може бути порожнім!"
-        return 1
+# Install prerequisites (if missing)
+command_exists() { command -v "$1" >/dev/null 2>&1; }
+
+if ! command_exists docker; then
+  echo "➡ Docker not found — installing (requires sudo)..."
+  sudo apt update -y
+  sudo apt install -y ca-certificates curl gnupg lsb-release lsof
+  sudo install -m 0755 -d /etc/apt/keyrings || true
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  sudo chmod a+r /etc/apt/keyrings/docker.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+  sudo apt update -y
+  sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+  sudo usermod -aG docker "$USER" || true
+  echo "✅ Docker installed. After install you may need to run: wsl --shutdown (in Windows) then re-open Ubuntu."
+else
+  echo "✅ Docker already installed."
+fi
+
+# Helper functions used by generated scripts (we'll embed versions in the scripts)
+# ---------------------------
+# create_wp (only asks name; port auto-chosen)
+# ---------------------------
+cat > "$BIN_DIR/create_wp" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+SITES_DIR="${SITES_DIR:-$HOME/projects}"
+
+# find a free port in a range (tries 8000..8999)
+find_free_port() {
+  local p
+  for p in $(seq 8000 8999); do
+    # system-level check
+    if ss -tulpn 2>/dev/null | grep -q ":${p} "; then
+      continue
     fi
-
-    if lsof -i :"$PORT" >/dev/null 2>&1; then
-        echo "❌ Порт $PORT вже зайнятий!"
-        return 1
+    # docker-level check: any container (running or stopped) with that published port
+    if docker ps -a --format '{{.Ports}}' | grep -q ":${p}->"; then
+      continue
     fi
+    echo "$p"
     return 0
+  done
+  return 1
 }
 
-# ===========================
-#  Перевірка існування сайту
-# ===========================
-site_exists() {
-    local NAME="$1"
-
-    if [[ -d "$BASE_DIR/$NAME" ]]; then
-        echo "❌ Сайт '$NAME' вже існує!"
-        return 1
+wait_db_ready() {
+  local dbc="$1"
+  local timeout=90
+  local waited=0
+  while true; do
+    # try mysqladmin ping
+    if docker exec "$dbc" sh -c "mysqladmin ping -uroot -proot >/dev/null 2>&1"; then
+      return 0
     fi
-
-    if docker ps -a --format '{{.Names}}' | grep -q "^${NAME}_" ; then
-        echo "❌ Контейнери з назвою '$NAME' вже існують!"
-        return 1
+    sleep 2
+    waited=$((waited+2))
+    if [ $waited -ge $timeout ]; then
+      return 1
     fi
-    return 0
+  done
 }
 
-# ===========================
-#  Створення сайту
-# ===========================
-create_site() {
-    read -rp "Назва сайту: " NAME
-    [[ -z "$NAME" ]] && echo "❌ Назва не може бути порожня!" && return
+if [ -z "${1:-}" ]; then
+  echo "❗ Usage: create_wp <site_name>"
+  exit 1
+fi
 
-    site_exists "$NAME" || return
+SITE="$1"
+if echo "$SITE" | grep -Eq '[^A-Za-z0-9_-]'; then
+  echo "❌ Назва сайту може містити лише латинські літери, цифри, '_' або '-'"
+  exit 1
+fi
 
-    read -rp "Порт (напр. 8081): " PORT
-    check_port "$PORT" || return
+mkdir -p "$SITES_DIR"
+SITE_DIR="$SITES_DIR/$SITE"
+if [ -d "$SITE_DIR" ] && [ -f "$SITE_DIR/docker-compose.yml" ]; then
+  echo "❌ Сайт '$SITE' вже існує."
+  exit 1
+fi
 
-    echo "➡ Створюю сайт '$NAME'..."
-    SITE_DIR="$BASE_DIR/$NAME"
-    mkdir -p "$SITE_DIR"
+PORT=$(find_free_port) || { echo "❌ Не вдалось знайти вільний порт (8000-8999)"; exit 1; }
 
-    cat > "$SITE_DIR/docker-compose.yml" <<EOF
+echo "➡ Створюю сайт '$SITE' на порту $PORT..."
+mkdir -p "$SITE_DIR"
+
+# create docker-compose.yml with unique volumes
+cat > "$SITE_DIR/docker-compose.yml" <<YML
+version: "3.9"
 services:
   db:
     image: mysql:8.0
-    container_name: ${NAME}_db
+    container_name: ${SITE}_db
     restart: always
     environment:
-      MYSQL_ROOT_PASSWORD: rootpass
-      MYSQL_DATABASE: ${NAME}
-      MYSQL_USER: ${NAME}
-      MYSQL_PASSWORD: pass
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: ${SITE}
+      MYSQL_USER: wpuser
+      MYSQL_PASSWORD: wppass
     volumes:
-      - ${NAME}_db_data:/var/lib/mysql
+      - ${SITE}_db_data:/var/lib/mysql
 
-  wp:
+  wordpress:
     image: wordpress:php8.2-apache
-    container_name: ${NAME}_wp
-    restart: always
+    container_name: ${SITE}_wp
+    depends_on:
+      - db
     ports:
       - "${PORT}:80"
-    environment:
-      WORDPRESS_DB_HOST: db
-      WORDPRESS_DB_NAME: ${NAME}
-      WORDPRESS_DB_USER: ${NAME}
-      WORDPRESS_DB_PASSWORD: pass
     volumes:
-      - ${NAME}_wp_data:/var/www/html
+      - ./wp:/var/www/html
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_USER: wpuser
+      WORDPRESS_DB_PASSWORD: wppass
+      WORDPRESS_DB_NAME: ${SITE}
 
 volumes:
-  ${NAME}_db_data:
-  ${NAME}_wp_data:
+  ${SITE}_db_data:
+YML
+
+# create empty wp folder (WordPress will populate on first run)
+mkdir -p "$SITE_DIR/wp"
+
+echo "➡ Піднімаю контейнери..."
+if docker compose -f "$SITE_DIR/docker-compose.yml" up -d; then
+  echo "⏳ Чекаю, поки БД буде готова (timeout 90s)..."
+  if wait_db_ready "${SITE}_db"; then
+    echo "✅ Сайт '$SITE' створено і запущено: http://localhost:${PORT}"
+  else
+    echo "❗ БД не відповіла вчасно. Перевір логи: docker logs ${SITE}_db"
+    echo "➡ Спробую прибрати частково створені ресурси..."
+    docker compose -f "$SITE_DIR/docker-compose.yml" down -v --remove-orphans || true
+  fi
+else
+  echo "❌ Помилка запуску контейнерів. Очищаю..."
+  docker compose -f "$SITE_DIR/docker-compose.yml" down -v --remove-orphans || true
+  rm -rf "$SITE_DIR"
+  exit 1
+fi
 EOF
+chmod +x "$BIN_DIR/create_wp"
 
-    cd "$SITE_DIR" || return
+# ---------------------------
+# run (control) script
+# ---------------------------
+cat > "$BIN_DIR/run" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
 
-    echo "➡ Запускаю контейнери..."
-    if ! docker compose up -d; then
-        echo "❌ Помилка під час запуску! Очищаю..."
-        docker compose down -v 2>/dev/null
-        cd "$BASE_DIR" && rm -rf "$SITE_DIR"
-        return
+SITES_DIR="${SITES_DIR:-$HOME/projects}"
+
+if [ -z "${1:-}" ] || [ -z "${2:-}" ]; then
+  echo "❗ Usage: run <site_name> <start|stop|restart|logs|open>"
+  exit 1
+fi
+
+SITE="$1"
+CMD="$2"
+SITE_DIR="$SITES_DIR/$SITE"
+YML="$SITE_DIR/docker-compose.yml"
+
+if [ ! -f "$YML" ]; then
+  echo "❌ Site '$SITE' not found at $SITE_DIR"
+  exit 1
+fi
+
+case "$CMD" in
+  start)
+    docker compose -f "$YML" up -d
+    ;;
+  stop)
+    docker compose -f "$YML" down
+    ;;
+  restart)
+    docker compose -f "$YML" down
+    docker compose -f "$YML" up -d
+    ;;
+  logs)
+    docker compose -f "$YML" logs -f
+    ;;
+  open)
+    PORT=$(grep -oP '[0-9]+(?=:80)' "$YML" | head -n1)
+    if [ -z "$PORT" ]; then
+      echo "❗ Не вдалось визначити порт"
+      exit 1
     fi
+    xdg-open "http://localhost:$PORT" || echo "Відкрий у браузері: http://localhost:$PORT"
+    ;;
+  *)
+    echo "Commands: start | stop | restart | logs | open"
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "$BIN_DIR/run"
 
-    echo "✅ Сайт '$NAME' створено!"
-    echo "🌐 URL: http://localhost:${PORT}"
+# ---------------------------
+# wpmanager menu
+# ---------------------------
+cat > "$BIN_DIR/wpmanager" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+SITES_DIR="${SITES_DIR:-$HOME/projects}"
+
+print_header() {
+  echo "========================================"
+  echo " WordPress Manager"
+  echo " Sites dir: $SITES_DIR"
+  echo "========================================"
 }
 
-# ===========================
-#  Запуск сайту
-# ===========================
-start_site() {
-    read -rp "Назва сайту: " NAME
-    [[ ! -d "$BASE_DIR/$NAME" ]] && echo "❌ Сайт не знайдено!" && return
-    cd "$BASE_DIR/$NAME"
-    docker compose up -d
-    echo "✅ Сайт '$NAME' запущено!"
-}
-
-# ===========================
-#  Зупинка сайту
-# ===========================
-stop_site() {
-    read -rp "Назва сайту: " NAME
-    [[ ! -d "$BASE_DIR/$NAME" ]] && echo "❌ Сайт не знайдено!" && return
-    cd "$BASE_DIR/$NAME"
-    docker compose down
-    echo "⏹ Сайт '$NAME' зупинено!"
-}
-
-# ===========================
-#  Повне видалення сайту
-# ===========================
-delete_site() {
-    read -rp "Назва сайту: " NAME
-    SITE_DIR="$BASE_DIR/$NAME"
-
-    [[ ! -d "$SITE_DIR" ]] && echo "❌ Сайт не знайдено!" && return
-
-    echo "⚠ Увага: все буде видалено остаточно!"
-    read -rp "Впевнені? (y/N): " CONFIRM
-    [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]] && echo "❌ Скасовано." && return
-
-    cd "$SITE_DIR"
-
-    echo "➡ Зупиняю та видаляю контейнери..."
-    docker compose down -v 2>/dev/null
-
-    echo "➡ Видаляю volumes..."
-    docker volume rm ${NAME}_db_data ${NAME}_wp_data 2>/dev/null
-
-    echo "➡ Видаляю директорію..."
-    rm -rf "$SITE_DIR"
-
-    echo "➡ Перевіряю orphan volumes..."
-    docker volume ls --format '{{.Name}}' | grep "^${NAME}_" | xargs -r docker volume rm
-
-    echo "✅ Сайт '$NAME' ПОВНІСТЮ видалено!"
-}
-
-# ===========================
-#  Список сайтів
-# ===========================
 list_sites() {
-    echo "📌 Сайти:"
-    ls "$BASE_DIR"
-    echo ""
+  mkdir -p "$SITES_DIR"
+  echo "Projects in $SITES_DIR:"
+  for d in "$SITES_DIR"/*/; do
+    [ -d "$d" ] || continue
+    dname="$(basename "$d")"
+    if [ -f "$SITES_DIR/$dname/docker-compose.yml" ]; then
+      echo " - $dname"
+    fi
+  done
 }
 
-# ===========================
-#  Меню
-# ===========================
-while true; do
-    echo ""
-    echo "========== WP Manager =========="
-    echo "1) Створити сайт"
-    echo "2) Запустити сайт"
-    echo "3) Зупинити сайт"
-    echo "4) Видалити сайт"
-    echo "5) Список сайтів"
-    echo "6) Вихід"
-    echo "================================"
-    read -rp "Вибір: " CHOICE
+delete_site_full() {
+  read -r -p "Site name to delete: " SITE
+  SITE_DIR="$SITES_DIR/$SITE"
+  if [ ! -d "$SITE_DIR" ] || [ ! -f "$SITE_DIR/docker-compose.yml" ]; then
+    echo "❌ Site not found: $SITE_DIR"
+    return
+  fi
+  read -r -p "Are you SURE to permanently delete '$SITE'? (y/N): " confirm
+  if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+    echo "Cancelled."
+    return
+  fi
 
-    case "$CHOICE" in
-        1) create_site ;;
-        2) start_site ;;
-        3) stop_site ;;
-        4) delete_site ;;
-        5) list_sites ;;
-        6) exit 0 ;;
-        *) echo "❌ Невірний вибір!" ;;
-    esac
+  echo "➡ Stopping and removing containers (compose down -v)..."
+  docker compose -f "$SITE_DIR/docker-compose.yml" down -v --remove-orphans || true
+
+  echo "➡ Removing containers by name..."
+  docker rm -f "${SITE}_wp" "${SITE}_db" 2>/dev/null || true
+
+  echo "➡ Removing volumes by pattern..."
+  docker volume ls --format '{{.Name}}' | grep -E "^${SITE}_" | xargs -r docker volume rm -f || true
+
+  echo "➡ Removing site folder (may require sudo)..."
+  sudo rm -rf "$SITE_DIR" || rm -rf "$SITE_DIR"
+
+  echo "✅ Site '$SITE' fully removed."
+}
+
+print_menu() {
+  echo ""
+  echo "1) Create new site (no port input — auto-assigned)"
+  echo "2) Start site"
+  echo "3) Stop site"
+  echo "4) Delete site (FULL remove)"
+  echo "5) List sites"
+  echo "6) Run cleanup (stop & remove all containers)  ⚠"
+  echo "0) Exit"
+  echo ""
+}
+
+while true; do
+  print_header
+  print_menu
+  read -r -p "Choice: " CH
+  case "$CH" in
+    1)
+      read -r -p "Site name (letters,digits,_,- only): " NAME
+      "$HOME/.local/bin/create_wp" "$NAME" || true
+      read -r -p "Press Enter..." _
+      ;;
+    2)
+      read -r -p "Site name to start: " NAME
+      "$HOME/.local/bin/run" "$NAME" start || true
+      read -r -p "Press Enter..." _
+      ;;
+    3)
+      read -r -p "Site name to stop: " NAME
+      "$HOME/.local/bin/run" "$NAME" stop || true
+      read -r -p "Press Enter..." _
+      ;;
+    4)
+      delete_site_full
+      read -r -p "Press Enter..." _
+      ;;
+    5)
+      list_sites
+      read -r -p "Press Enter..." _
+      ;;
+    6)
+      read -r -p "This will stop and remove ALL containers. Proceed? (y/N): " CONF
+      if [[ "$CONF" == "y" || "$CONF" == "Y" ]]; then
+        docker stop $(docker ps -aq) 2>/dev/null || true
+        docker rm -f $(docker ps -aq) 2>/dev/null || true
+      fi
+      read -r -p "Press Enter..." _
+      ;;
+    0) exit 0 ;;
+    *) echo "Invalid choice" ;;
+  esac
 done
+EOF
+chmod +x "$BIN_DIR/wpmanager"
+
+echo "============================================"
+echo " Installation complete!"
+echo " - run: wpmanager"
+echo " - create: create_wp <site_name>"
+echo " - control: run <site_name> start|stop|restart|logs|open"
+echo " Sites directory: $SITES_DIR"
+echo "============================================"
