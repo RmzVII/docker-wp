@@ -123,19 +123,20 @@ services:
       - ${SITE}_db_data:/var/lib/mysql
 
   wordpress:
-    image: wordpress:php8.2-apache
-    container_name: ${SITE}_wp
-    depends_on:
-      - db
-    ports:
-      - "${PORT}:80"
-    volumes:
-      - ./wp:/var/www/html
-    environment:
-      WORDPRESS_DB_HOST: db:3306
-      WORDPRESS_DB_USER: wpuser
-      WORDPRESS_DB_PASSWORD: wppass
-      WORDPRESS_DB_NAME: ${SITE}
+  image: wordpress:php8.2-apache
+  container_name: ${SITE}_wp
+  depends_on:
+    - db
+  ports:
+    - "${PORT}:80"
+  volumes:
+    - ./wp:/var/www/html
+    - ./php.ini:/usr/local/etc/php/conf.d/custom.ini
+  environment:
+    WORDPRESS_DB_HOST: db:3306
+    WORDPRESS_DB_USER: wpuser
+    WORDPRESS_DB_PASSWORD: wppass
+    WORDPRESS_DB_NAME: ${SITE}
 
 volumes:
   ${SITE}_db_data:
@@ -143,6 +144,14 @@ YML
 
 # create empty wp folder (WordPress will populate on first run)
 mkdir -p "$SITE_DIR/wp"
+
+# create custom php.ini for WordPress container
+cat > "$SITE_DIR/php.ini" <<'PHPINI'
+upload_max_filesize = 512M
+post_max_size = 512M
+memory_limit = 512M
+max_execution_time = 300
+PHPINI
 
 echo "➡ Піднімаю контейнери..."
 if docker compose -f "$SITE_DIR/docker-compose.yml" up -d; then
