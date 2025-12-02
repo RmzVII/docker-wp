@@ -307,6 +307,17 @@ while true; do
     2)
       read -r -p "Site name to start: " NAME
       "$HOME/.local/bin/run" "$NAME" start || true
+
+      YML="$SITES_DIR/$NAME/docker-compose.yml"
+      if [ -f "$YML" ]; then
+        PORT=$(grep -oP '[0-9]+(?=:80)' "$YML" | head -n1)
+        if [ -n "$PORT" ]; then
+          echo "➡ Сайт запущено: http://localhost:$PORT"
+        else
+          echo "❗ Не можу знайти порт у $YML"
+        fi
+      fi
+
       read -r -p "Press Enter..." _
       ;;
     3)
