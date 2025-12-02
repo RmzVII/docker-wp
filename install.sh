@@ -284,6 +284,7 @@ delete_site_full() {
 
 print_menu() {
   echo ""
+  echo "V1.1"
   echo "1) Create new site (no port input — auto-assigned)"
   echo "2) Start site"
   echo "3) Stop site"
