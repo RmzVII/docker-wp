@@ -123,20 +123,20 @@ services:
       - ${SITE}_db_data:/var/lib/mysql
 
   wordpress:
-  image: wordpress:php8.2-apache
-  container_name: ${SITE}_wp
-  depends_on:
-    - db
-  ports:
-    - "${PORT}:80"
-  volumes:
-    - ./wp:/var/www/html
-    - ./php.ini:/usr/local/etc/php/conf.d/custom.ini
-  environment:
-    WORDPRESS_DB_HOST: db:3306
-    WORDPRESS_DB_USER: wpuser
-    WORDPRESS_DB_PASSWORD: wppass
-    WORDPRESS_DB_NAME: ${SITE}
+    image: wordpress:php8.2-apache
+    container_name: ${SITE}_wp
+    depends_on:
+      - db
+    ports:
+      - "${PORT}:80"
+    volumes:
+      - ./wp:/var/www/html
+      - ./php.ini:/usr/local/etc/php/conf.d/custom.ini
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_USER: wpuser
+      WORDPRESS_DB_PASSWORD: wppass
+      WORDPRESS_DB_NAME: ${SITE}
 
 volumes:
   ${SITE}_db_data:
